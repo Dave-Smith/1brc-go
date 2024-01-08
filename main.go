@@ -23,11 +23,12 @@ func main() {
 	}
 	defer file.Close()
 
-	weather, cities := readWeatherDataBytes(file)
+	weather, _ := readWeatherDataBytes(file)
 	readFileTime := time.Now()
-	fmt.Printf("finished reading files in %f seconds\f", readFileTime.Sub(start).Seconds())
+	fmt.Printf("finished reading files in %f seconds\n", readFileTime.Sub(start).Seconds())
 
 	res := make(map[uint64]Temps)
+	analyzeTime := time.Now()
 	for city, temps := range weather {
 		var min int16 = 2555
 		var max int16 = -2555
@@ -44,9 +45,10 @@ func main() {
 		}
 		t := Temps{float64(min / 10), float64(max / 10), float64(acc/int64(len(temps))) / 10}
 		res[city] = t
-		fmt.Printf("adding city %s with min %f max %f avg %f\n", cities[city], t.min, t.max, t.avg)
+		//fmt.Printf("adding city %s with min %f max %f avg %f\n", cities[city], t.min, t.max, t.avg)
 	}
 
+	fmt.Printf("Analyzed the data in %f seconds\n", analyzeTime.Sub(readFileTime).Seconds())
 	end := time.Now()
 	fmt.Printf("finished %d cities in %v seconds", len(res), end.Sub(start).Seconds())
 }
@@ -89,10 +91,11 @@ func readWeatherDataBytes(file io.Reader) (map[uint64][]int16, map[uint64]string
 		if _, exists := cities[cityHash]; !exists {
 			city := parseCityName(line)
 			cities[cityHash] = city
+			weather[cityHash] = make([]int16, 0, 1000)
 		}
 		weather[cityHash] = append(weather[cityHash], temp)
-		if i%10000000 == 0 {
-			fmt.Println("processed another 10000000 lines")
+		if i%100000000 == 0 {
+			fmt.Printf("%v processed another 100000000 lines\n", time.Now().GoString())
 		}
 		i++
 	}
@@ -110,14 +113,15 @@ func parseCityName(buffer []byte) string {
 }
 
 func parseCityHash(buffer []byte) uint64 {
-	hash := uint64(86425)
-	for _, b := range buffer {
-		if b == ';' {
-			break
-		}
-		hash += uint64(b) + hash + hash<<5
-	}
-	return hash
+	// hash := uint64(86425)
+	// for _, b := range buffer {
+	// 	if b == ';' {
+	// 		break
+	// 	}
+	// 	hash += uint64(b) + hash + hash<<5
+	// }
+	// return hash
+	return uint64(86421)
 }
 
 func parseTemp(buffer []byte) (int16, error) {
