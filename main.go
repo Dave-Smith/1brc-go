@@ -6,6 +6,8 @@ import (
 	"io"
 	"log"
 	"os"
+	"runtime"
+	"runtime/pprof"
 	"strconv"
 	"sync"
 	"time"
@@ -17,31 +19,36 @@ type Temps struct {
 	avg float64
 }
 
+type Measurements struct {
+	min, max, count int
+	avg             float64
+}
+
 func main() {
 	// Create a CPU profile file
-	// cpuProf, err := os.Create("cpu.prof")
-	// if err != nil {
-	// 	panic(err)
-	// }
-	// defer cpuProf.Close()
+	cpuProf, err := os.Create("cpu.prof")
+	if err != nil {
+		panic(err)
+	}
+	defer cpuProf.Close()
 
 	// Start CPU profiling
-	// if err := pprof.StartCPUProfile(cpuProf); err != nil {
-	// 	panic(err)
-	// }
-	// defer pprof.StopCPUProfile()
+	if err := pprof.StartCPUProfile(cpuProf); err != nil {
+		panic(err)
+	}
+	defer pprof.StopCPUProfile()
 
 	// Create a memory profile file
-	// memProf, err := os.Create("mem.prof")
-	// if err != nil {
-	// 	panic(err)
-	// }
-	// defer memProf.Close()
+	memProf, err := os.Create("mem.prof")
+	if err != nil {
+		panic(err)
+	}
+	defer memProf.Close()
 
 	// Write memory profile to file
-	// if err := pprof.WriteHeapProfile(memProf); err != nil {
-	// 	panic(err)
-	// }
+	if err := pprof.WriteHeapProfile(memProf); err != nil {
+		panic(err)
+	}
 
 	start := time.Now()
 	// file, err := os.Open("./measurements.txt")
@@ -110,62 +117,140 @@ func concurrentEmptyRead(filename string) {
 	wg.Wait()
 }
 
+var workers int = runtime.NumCPU()
+
+const chunkSize int = 4 * 1024 * 1024
+
 func chunkedReadWithWorkerPool(filename string) {
-	const workers int = 8
-	const chunkSize int = 4 * 1024 * 1024
-
 	chunks := make(chan []byte, 100)
-	res := make(chan int)
-	wg := sync.WaitGroup{}
+	res := make(chan map[string]Measurements)
+	done := make(chan interface{})
+	wg := &sync.WaitGroup{}
+	aggregate := make(map[string]Measurements)
+
 	for i := 0; i < workers; i++ {
-		wg.Add(1)
-
-		go func(chunks <-chan []byte, res chan<- int, w *sync.WaitGroup) {
-			defer w.Done()
-			length := 0
-			reads := 0
-			for in := range chunks {
-				length += len(in)
-				reads++
-			}
-			log.Printf("read %d bytes, in %d reads\n", length, reads)
-			res <- length
-
-		}(chunks, res, &wg)
+		go func() {
+			wg.Add(1)
+			worker(chunks, res, wg)
+		}()
 	}
 
 	go func() {
 		wg.Wait()
-		close(res)
+		close(done)
 	}()
 
-	go func(filename string, chunks chan<- []byte) {
-		file, err := os.Open(filename)
-		if err != nil {
-			panic(err)
-		}
-		defer file.Close()
+	readChunks(filename, chunks)
 
-		r := bufio.NewReader(file)
-		for {
-			buf := make([]byte, chunkSize)
-			n, err := r.Read(buf)
-			if n == 0 {
-				if err == io.EOF {
-					break
-				}
-				if err != nil {
-					fmt.Printf(err.Error())
-				}
+label:
+	for {
+		select {
+		case <-done:
+			break label
+		case x := <-res:
+			for c, m := range x {
+				a := aggregate[c]
+				totalCount := a.count + m.count
+				a.min = min(a.min, m.min)
+				a.max = max(a.max, m.max)
+				a.count += m.count
+				a.avg = ((a.avg * float64(a.count)) + (m.avg * float64(m.count))) / float64(totalCount)
+				aggregate[c] = a
 			}
-			chunks <- buf
 		}
+	}
+	close(res)
+}
 
-		close(chunks)
-	}(filename, chunks)
-
+func worker(chunks <-chan []byte, res chan<- map[string]Measurements, wg *sync.WaitGroup) {
+	log.Println("starting worker")
+	defer wg.Done()
 	length := 0
-	length += <-res
+	reads := 0
+	lines := 0
+	newLine := byte('\n')
+	word := []byte{}
+	measurements := make(map[string]Measurements, 250)
+	for in := range chunks {
+		lineBoundary := 0
+		length += len(in)
+		reads++
+		for i := 0; i < len(in); i++ {
+			if in[i] == newLine || i == len(in)-1 { //handle last line
+				lines++
+				word = in[lineBoundary:i]
+				lineBoundary = i + 1
+				city, temp := parseLine(word)
+				word = word[:0]
+				//m := Measurements{}
+				m := measurements[city]
+				m.count++
+				m.min = min(m.min, temp)
+				m.max = max(m.max, temp)
+				m.avg = m.avg + (float64(temp)-m.avg)/float64(m.count)
+				measurements[city] = m
+			}
+		}
+	}
+	log.Printf("read %d bytes, %d lines, in %d reads\n", length, lines, reads)
+	res <- measurements
+}
+
+const semi byte = byte(';')
+const period = byte('.')
+
+func parseLine(line []byte) (string, int) {
+	var city string
+
+	splitIndex := 0
+	for i := 0; i < len(line); i++ {
+		if line[i] == semi {
+			city = string(line[0 : i-1])
+			splitIndex = i
+		}
+	}
+
+	numLength := len(line) - (splitIndex + 2)
+	numBuffer := make([]byte, numLength)
+	for i := splitIndex; i < len(line); i++ {
+		if line[i] == period {
+			continue
+		}
+		numBuffer = append(numBuffer, line[i])
+	}
+	return city, int(numLength)
+}
+
+func readChunks(filename string, chunks chan []byte) {
+	file, err := os.Open(filename)
+	if err != nil {
+		panic(err)
+	}
+	defer file.Close()
+
+	newLine := byte('\n')
+	r := bufio.NewReaderSize(file, chunkSize+64)
+	for {
+		buf := make([]byte, chunkSize)
+		n, err := r.Read(buf)
+		if n == 0 {
+			if err == io.EOF {
+				break
+			}
+			if err != nil {
+				fmt.Printf(err.Error())
+			}
+		}
+		b, err := r.ReadBytes(newLine)
+		if err == nil || err == io.EOF {
+			buf = append(buf, b...)
+		} else {
+			fmt.Printf(err.Error())
+		}
+		chunks <- buf
+	}
+	log.Println("finished reading file. Closing channel")
+	close(chunks)
 }
 
 func fileLength(filename string) int64 {
@@ -176,18 +261,6 @@ func fileLength(filename string) int64 {
 	size := s.Size()
 	log.Printf("file size %d", size)
 	return size
-}
-
-func emptyBufScanner(file io.Reader) {
-	scanner := bufio.NewScanner(file)
-	scanner.Split(bufio.ScanLines)
-
-	length := 0
-	for scanner.Scan() {
-		line := scanner.Bytes()
-		length += len(line)
-	}
-	//log.Printf("Read %d bytes\n", length)
 }
 
 func emptyBufRead(file io.Reader) {
@@ -210,15 +283,6 @@ func emptyBufRead(file io.Reader) {
 		}
 	}
 	log.Printf("Read %d bytes\n", length)
-}
-
-func emptyIoRead(file io.Reader) {
-	b, err := io.ReadAll(file)
-
-	if err != nil {
-		panic(err)
-	}
-	log.Printf("Read %d bytes\n", len(b))
 }
 
 func readWeatherData(file io.Reader) map[string][]int16 {
