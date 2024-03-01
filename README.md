@@ -173,3 +173,4 @@ func chunkedReadWithWorkerPool(filename string) {
 }
 ```
 This one reads the entire file in about 9 seconds. I have two knobs that can be turned - number of workers and buffer size. I don't see much difference running between 4 and 32 workers. I sampled different buffer sizes from 4MB to 128MB. Anything from 4MB to 32MB produced a similar time to completion. This isn't different than the buffered reader attempt above. The other one didn't use goroutines or channels. I was hoping for an improvement. The time is almost identical, so maybe I can use the goroutines and channels to distribute the parsing later.
+
